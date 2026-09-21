@@ -1,5 +1,6 @@
 import os
 import urllib.request
+import urllib.parse
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
