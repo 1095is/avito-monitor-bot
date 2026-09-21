@@ -1,12 +1,16 @@
 import os
-import time
+import json
 import requests
-from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-AVITO_URL = "https://www.avito.ru/moskva/noutbuki?localPriority=0&q=%D0%BD%D0%BE%D1%83%D1%82%D0%B1%D1%83%D0%BA%D0%B8"
+FEED_URL = "https://avito2rss.duck.consulting/feeds/59424.atom"
+
+SEEN_FILE = "seen.json"
+
+ATOM = "{http://www.w3.org/2005/Atom}"
 
 
 def send_telegram(text):
@@ -16,7 +20,8 @@ def send_telegram(text):
         url,
         data={
             "chat_id": CHAT_ID,
-            "text": text
+            "text": text,
+            "disable_web_page_preview": False
         },
         timeout=20
     )
@@ -24,49 +29,95 @@ def send_telegram(text):
     response.raise_for_status()
 
 
-print("Запуск проверки Avito...")
+def load_seen():
+    if not os.path.exists(SEEN_FILE):
+        return set()
 
-try:
-    response = requests.get(
-        AVITO_URL,
-        headers={
-            "User-Agent": "Mozilla/5.0"
-        },
-        timeout=20
-    )
+    try:
+        with open(SEEN_FILE, "r", encoding="utf-8") as file:
+            return set(json.load(file))
+    except Exception:
+        return set()
 
-    print("HTTP:", response.status_code)
-    print("Размер страницы:", len(response.text))
 
-    if response.status_code == 200:
-        soup = BeautifulSoup(response.text, "html.parser")
+def save_seen(seen):
+    with open(SEEN_FILE, "w", encoding="utf-8") as file:
+        json.dump(list(seen), file, ensure_ascii=False, indent=2)
 
-        title = soup.title.get_text(strip=True) if soup.title else "заголовок не найден"
 
-        message = (
-            "🔎 Avito отвечает.\n\n"
-            f"HTTP: {response.status_code}\n"
-            f"Размер страницы: {len(response.text)}\n"
-            f"Заголовок: {title[:200]}"
-        )
+print("Проверяем Avito2RSS...")
 
-    elif response.status_code == 429:
-        message = (
-            "⚠️ Avito ограничил запрос.\n\n"
-            "HTTP: 429 Too Many Requests\n\n"
-            "Мы не будем обходить ограничение."
-        )
+response = requests.get(
+    FEED_URL,
+    timeout=30
+)
 
+response.raise_for_status()
+
+root = ET.fromstring(response.content)
+
+entries = root.findall(f"{ATOM}entry")
+
+print(f"Найдено записей в ленте: {len(entries)}")
+
+seen = load_seen()
+new_items = []
+
+for entry in entries:
+    item_id = entry.findtext(f"{ATOM}id")
+
+    title = entry.findtext(f"{ATOM}title", "Без названия")
+
+    link_element = entry.find(f"{ATOM}link")
+
+    if link_element is not None:
+        link = link_element.attrib.get("href", "")
     else:
-        message = (
-            f"⚠️ Avito вернул HTTP {response.status_code}."
-        )
+        link = ""
 
-except Exception as e:
-    message = (
-        "❌ Ошибка при обращении к Avito.\n\n"
-        f"{type(e).__name__}: {e}"
+    if not item_id:
+        item_id = link or title
+
+    if item_id in seen:
+        continue
+
+    new_items.append(
+        {
+            "id": item_id,
+            "title": title.strip(),
+            "link": link
+        }
     )
 
-send_telegram(message)
-print(message)
+
+# Первый запуск:
+# запоминаем существующие объявления,
+# но НЕ отправляем их все сразу.
+if not seen:
+    for item in new_items:
+        seen.add(item["id"])
+
+    save_seen(seen)
+
+    send_telegram(
+        "✅ Монитор Avito запущен!\n\n"
+        f"В ленте найдено объявлений: {len(entries)}\n\n"
+        "Существующие объявления запомнены. "
+        "Теперь я буду присылать только новые."
+    )
+
+else:
+    for item in new_items:
+        message = (
+            "🆕 Новое объявление на Avito!\n\n"
+            f"{item['title']}\n\n"
+            f"{item['link']}"
+        )
+
+        send_telegram(message)
+
+        seen.add(item["id"])
+
+    save_seen(seen)
+
+    print(f"Новых объявлений отправлено: {len(new_items)}")
